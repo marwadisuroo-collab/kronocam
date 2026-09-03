@@ -1,0 +1,60 @@
+import 'package:geocoding/geocoding.dart';
+import 'package:geolocator/geolocator.dart';
+
+class LocationResult {
+  final double latitude;
+  final double longitude;
+  final String? address;
+
+  const LocationResult({
+    required this.latitude,
+    required this.longitude,
+    this.address,
+  });
+}
+
+class LocationService {
+  static Future<LocationResult?> getCurrentLocation() async {
+    try {
+      if (!await Geolocator.isLocationServiceEnabled()) return null;
+
+      var permission = await Geolocator.checkPermission();
+      if (permission == LocationPermission.denied) {
+        permission = await Geolocator.requestPermission();
+      }
+      if (permission == LocationPermission.denied ||
+          permission == LocationPermission.deniedForever) {
+        return null;
+      }
+
+      final position = await Geolocator.getCurrentPosition();
+      String? address;
+      try {
+        final placemarks = await placemarkFromCoordinates(
+          position.latitude,
+          position.longitude,
+        );
+        if (placemarks.isNotEmpty) {
+          final place = placemarks.first;
+          final parts = <String>[
+            if ((place.locality ?? '').trim().isNotEmpty) place.locality!.trim(),
+            if ((place.administrativeArea ?? '').trim().isNotEmpty)
+              place.administrativeArea!.trim(),
+            if ((place.country ?? '').trim().isNotEmpty) place.country!.trim(),
+          ];
+          if (parts.isNotEmpty) address = parts.join(', ');
+        }
+      } catch (_) {
+        // Coordinates are still useful when reverse geocoding is unavailable.
+      }
+
+      return LocationResult(
+        latitude: position.latitude,
+        longitude: position.longitude,
+        address: address,
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+}

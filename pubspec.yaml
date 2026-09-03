@@ -1,0 +1,65 @@
+name: kronocam
+description: "KronoCam - Timestamp Camera & Photo Editor. Add date, time, day & project name stamps to your photos."
+publish_to: 'none'
+
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.7.0
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  cupertino_icons: ^1.0.8
+  provider: ^6.1.4
+  shared_preferences: ^2.5.3
+  intl: ^0.20.2
+
+  # Camera + gallery
+  camera: ^0.11.1
+  image_picker: ^1.1.2
+  gal: ^2.3.1
+  path_provider: ^2.1.5
+  permission_handler: ^12.0.0+1
+  geolocator: ^14.0.2
+  geocoding: ^4.0.0
+
+  # Rendering the photo + stamp overlay to a savable image
+  path: ^1.9.0
+  image: ^4.9.2
+
+  # Monetization (rewarded ad to unlock stamp editing)
+  unity_ads_plugin: ^0.5.0
+  share_plus: ^13.3.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_launcher_icons: ^0.13.1
+  flutter_lints: ^5.0.0
+  flutter_native_splash: ^2.3.5
+
+flutter_native_splash:
+  color: "#0E0E10"
+  image: assets/icons/app_icon.png
+  branding: assets/icons/app_icon.png
+  android: true
+  ios: true
+  web: true
+  fullscreen: true
+
+flutter_launcher_icons:
+  android: true
+  ios: true
+  image_path: "assets/icons/app_icon.png"
+  adaptive_icon_background: "#0E0E10"
+  adaptive_icon_foreground: "assets/icons/app_icon_foreground.png"
+  web:
+    generate: true
+  windows:
+    generate: true
+  macos:
+    generate: true
+flutter:
+  uses-material-design: true
