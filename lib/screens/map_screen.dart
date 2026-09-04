@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
-import 'package:google_maps_flutter/google_maps_flutter.dart';
+import 'package:flutter_map/flutter_map.dart';
 import 'package:geocoding/geocoding.dart';
+import 'package:latlong2/latlong.dart';
 
 import '../services/location_service.dart';
 
@@ -14,7 +15,7 @@ class MapScreen extends StatefulWidget {
 }
 
 class _MapScreenState extends State<MapScreen> {
-  GoogleMapController? _mapController;
+  final MapController _mapController = MapController();
   late LatLng _selected;
   final _searchController = TextEditingController();
   bool _searching = false;
@@ -23,7 +24,10 @@ class _MapScreenState extends State<MapScreen> {
   void initState() {
     super.initState();
     final location = widget.initialLocation;
-    _selected = LatLng(location?.latitude ?? 20.5937, location?.longitude ?? 78.9629);
+    _selected = LatLng(
+      location?.latitude ?? 20.5937,
+      location?.longitude ?? 78.9629,
+    );
   }
 
   @override
@@ -40,7 +44,9 @@ class _MapScreenState extends State<MapScreen> {
       final results = await locationFromAddress(query);
       if (results.isEmpty) throw const FormatException('Place not found');
       final result = results.first;
-      await _select(LatLng(result.latitude, result.longitude));
+      final point = LatLng(result.latitude, result.longitude);
+      setState(() => _selected = point);
+      _mapController.move(point, 16);
     } catch (_) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -50,11 +56,6 @@ class _MapScreenState extends State<MapScreen> {
     } finally {
       if (mounted) setState(() => _searching = false);
     }
-  }
-
-  Future<void> _select(LatLng point) async {
-    setState(() => _selected = point);
-    await _mapController?.animateCamera(CameraUpdate.newLatLng(point));
   }
 
   Future<void> _useLocation() async {
@@ -71,15 +72,33 @@ class _MapScreenState extends State<MapScreen> {
       appBar: AppBar(title: const Text('Choose Location')),
       body: Stack(
         children: [
-          GoogleMap(
-            initialCameraPosition: CameraPosition(target: _selected, zoom: 15),
-            onMapCreated: (controller) => _mapController = controller,
-            onTap: _select,
-            zoomControlsEnabled: true,
-            myLocationButtonEnabled: true,
-            markers: {
-              Marker(markerId: const MarkerId('selected'), position: _selected),
-            },
+          FlutterMap(
+            mapController: _mapController,
+            options: MapOptions(
+              initialCenter: _selected,
+              initialZoom: 15,
+              onTap: (_, point) => setState(() => _selected = point),
+            ),
+            children: [
+              TileLayer(
+                urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+                userAgentPackageName: 'com.kronocam.app',
+              ),
+              MarkerLayer(
+                markers: [
+                  Marker(
+                    point: _selected,
+                    width: 48,
+                    height: 48,
+                    child: const Icon(
+                      Icons.location_pin,
+                      color: Colors.red,
+                      size: 44,
+                    ),
+                  ),
+                ],
+              ),
+            ],
           ),
           Positioned(
             left: 12,

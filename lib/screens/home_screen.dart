@@ -1,13 +1,14 @@
 import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
+import 'dart:ui' as ui;
 
 import 'package:camera/camera.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:image/image.dart' as img;
 import 'package:image_picker/image_picker.dart';
-import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:sensors_plus/sensors_plus.dart';
@@ -45,6 +46,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   Timer? _clockTimer;
   StreamSubscription<AccelerometerEvent>? _accelerometerSubscription;
   StreamSubscription<Position>? _locationSubscription;
+  final GlobalKey _overlayKey = GlobalKey();
+  double _previewLogicalWidth = 1;
   double _overlayRotation = 0;
   Offset _overlayFraction = const Offset(0.04, 0.72);
   bool _modificationsUnlocked = false;
@@ -87,7 +90,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       );
       _controller = CameraController(
         back,
-        ResolutionPreset.high,
+        ResolutionPreset.max,
         enableAudio: false,
       );
       _initFuture = _controller!.initialize();
@@ -189,78 +192,43 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   }
 
   Future<File> _stampCapturedPhoto(File source) async {
-    final sourceBytes = await source.readAsBytes();
-    var decoded = img.decodeImage(sourceBytes);
-    decoded ??= img.decodeJpg(sourceBytes);
+    if (!mounted) return source;
+    final devicePixelRatio = MediaQuery.devicePixelRatioOf(context);
+    await WidgetsBinding.instance.endOfFrame;
+    if (!mounted) return source;
+    final boundary =
+        _overlayKey.currentContext?.findRenderObject() as RenderRepaintBoundary?;
+    if (boundary == null || boundary.size.isEmpty) return source;
+    final overlayImage = await boundary.toImage(
+      pixelRatio: devicePixelRatio,
+    );
+    final overlayData = await overlayImage.toByteData(
+      format: ui.ImageByteFormat.png,
+    );
+    if (overlayData == null) return source;
+    final decoded = img.decodeImage(await source.readAsBytes());
     if (decoded == null) return source;
-    var photo = img.bakeOrientation(decoded);
-    if (photo.width < 100 || photo.height < 100) return source;
-    final shouldBeLandscape = _overlayRotation.abs() > 0.8;
-    final isLandscape = photo.width > photo.height;
-    if (shouldBeLandscape != isLandscape) {
-      photo = img.copyRotate(photo, angle: 90);
-    }
-    final lines = _stampLines();
-    if (lines.isEmpty) return source;
-
-    final scale = (photo.width / 1080.0).clamp(1.0, 4.0) *
-      (_stampConfig.textSize / 13.0);
-    final font = _stampConfig.textSize >= 18 ? img.arial24 : img.arial14;
-    final lineHeight = (font.lineHeight * scale).round().clamp(16, 56).toInt();
-    final horizontalPadding = (12 * scale).round();
-    final verticalPadding = (8 * scale).round();
-    final boxWidth = math.min(
-      photo.width - horizontalPadding * 2,
-      (300 * scale).round(),
-    ).toInt();
-    final wrappedLines = _wrapStampLines(lines, boxWidth, font, scale);
-    final boxHeight = wrappedLines.length * lineHeight + verticalPadding * 2;
-    final x = ((_overlayFraction.dx * photo.width).round()).clamp(
-      0,
-      photo.width - boxWidth,
-    ).toInt();
-    final y = ((_overlayFraction.dy * photo.height).round()).clamp(
-      0,
-      photo.height - boxHeight,
-    ).toInt();
-
-    img.drawRect(
-      photo,
-      x1: x,
-      y1: y,
-      x2: x + boxWidth,
-      y2: y + boxHeight,
-      color: _toImageColor(_stampConfig.backgroundColor),
+    final photo = img.bakeOrientation(decoded);
+    final overlay = img.decodeImage(overlayData.buffer.asUint8List());
+    if (overlay == null) return source;
+    final scale = photo.width /
+      (_previewLogicalWidth * devicePixelRatio);
+    final watermarkWidth = math.max(1, (overlay.width * scale).round());
+    final watermarkHeight = math.max(1, (overlay.height * scale).round());
+    final resized = img.copyResize(
+      overlay,
+      width: watermarkWidth,
+      height: watermarkHeight,
+      interpolation: img.Interpolation.cubic,
     );
-    final iconCenterX = x + horizontalPadding + (7 * scale).round();
-    final iconCenterY = y + verticalPadding + (7 * scale).round();
-    img.drawCircle(
+    img.compositeImage(
       photo,
-      x: iconCenterX,
-      y: iconCenterY,
-      radius: (5 * scale).round().clamp(4, 32).toInt(),
-      color: _toImageColor(_stampConfig.textColor),
+      resized,
+      dstX: (12 * scale).round(),
+      dstY: photo.height - watermarkHeight - (12 * scale).round(),
+      dstW: watermarkWidth,
+      dstH: watermarkHeight,
     );
-    img.drawPolygon(
-      photo,
-      vertices: [
-        img.Point(iconCenterX - (4 * scale).round(), iconCenterY + (3 * scale).round()),
-        img.Point(iconCenterX + (4 * scale).round(), iconCenterY + (3 * scale).round()),
-        img.Point(iconCenterX, iconCenterY + (10 * scale).round()),
-      ],
-      color: _toImageColor(_stampConfig.textColor),
-    );
-    for (var index = 0; index < wrappedLines.length; index++) {
-      img.drawString(
-        photo,
-        wrappedLines[index],
-        font: font,
-        x: x + horizontalPadding + (index == 0 ? (16 * scale).round() : 0),
-        y: y + verticalPadding + index * lineHeight,
-        color: img.ColorRgb8(255, 255, 255),
-      );
-    }
-
     final output = File(
       '${source.parent.path}/kronocam_stamped_${DateTime.now().microsecondsSinceEpoch}.jpg',
     );
@@ -269,75 +237,6 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       flush: true,
     );
     return output;
-  }
-
-  img.ColorRgba8 _toImageColor(Color color) {
-    final value = color.toARGB32();
-    return img.ColorRgba8(
-      (value >> 16) & 0xff,
-      (value >> 8) & 0xff,
-      value & 0xff,
-      (value >> 24) & 0xff,
-    );
-  }
-
-  List<String> _wrapStampLines(
-    List<String> lines,
-    int boxWidth,
-    img.BitmapFont font,
-    double scale,
-  ) {
-    final maxCharacters = math.max(
-      12,
-      ((boxWidth - 24 * scale) / (8 * scale)).floor(),
-    );
-    final wrapped = <String>[];
-    for (final line in lines) {
-      if (line.length <= maxCharacters) {
-        wrapped.add(line);
-        continue;
-      }
-      var remaining = line;
-      while (remaining.length > maxCharacters) {
-        var split = remaining.lastIndexOf(' ', maxCharacters);
-        if (split < 1) split = maxCharacters;
-        wrapped.add(remaining.substring(0, split));
-        remaining = remaining.substring(split).trimLeft();
-      }
-      if (remaining.isNotEmpty) wrapped.add(remaining);
-    }
-    return wrapped;
-  }
-
-  List<String> _stampLines() {
-    final lines = <String>['Kronocam'];
-    lines.add('Project: ${_stampConfig.projectName.trim()}');
-    if (_stampConfig.showLocation &&
-        _stampConfig.address?.trim().isNotEmpty == true) {
-      lines.add('Address: ${_stampConfig.address!.trim()}');
-    }
-    if (_stampConfig.showLocation &&
-        _stampConfig.latitude != null &&
-        _stampConfig.longitude != null) {
-      lines.add('Latitude: ${_stampConfig.latitude!.toStringAsFixed(5)}');
-      lines.add('Longitude: ${_stampConfig.longitude!.toStringAsFixed(5)}');
-    }
-    final dateLine = <String>[];
-    if (_stampConfig.showDay) {
-      dateLine.add(DateFormat('EEEE').format(_stampConfig.dateTime));
-    }
-    if (_stampConfig.showDate) {
-      dateLine.add(
-        '${_stampConfig.dateTime.day.toString().padLeft(2, '0')}/${_stampConfig.dateTime.month.toString().padLeft(2, '0')}/${_stampConfig.dateTime.year}',
-      );
-    }
-    if (_stampConfig.showTime) {
-      dateLine.add(
-        '${_stampConfig.dateTime.hour.toString().padLeft(2, '0')}:${_stampConfig.dateTime.minute.toString().padLeft(2, '0')}',
-      );
-    }
-    if (dateLine.isNotEmpty) lines.add(dateLine.join('  '));
-    return lines;
   }
 
   void _openEditor(File file, {bool autoSave = false}) {
@@ -763,6 +662,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                     child: LayoutBuilder(
                       builder: (context, constraints) {
                         final size = constraints.biggest;
+                        _previewLogicalWidth = size.width;
                         final position = Offset(
                           _overlayFraction.dx * size.width,
                           _overlayFraction.dy * size.height,
@@ -788,12 +688,15 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                                 },
                                 child: Transform.rotate(
                                   angle: _overlayRotation,
-                                  child: ValueListenableBuilder<StampConfig>(
-                                    valueListenable: _stampNotifier,
-                                    builder:
-                                        (context, config, _) => StampOverlay(
-                                          config: config,
-                                        ),
+                                  child: RepaintBoundary(
+                                    key: _overlayKey,
+                                    child: ValueListenableBuilder<StampConfig>(
+                                      valueListenable: _stampNotifier,
+                                      builder:
+                                          (context, config, _) => StampOverlay(
+                                            config: config,
+                                          ),
+                                    ),
                                   ),
                                 ),
                               ),

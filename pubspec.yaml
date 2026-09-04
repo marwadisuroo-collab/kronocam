@@ -2,7 +2,7 @@ name: kronocam
 description: "KronoCam - Timestamp Camera & Photo Editor. Add date, time, day & project name stamps to your photos."
 publish_to: 'none'
 
-version: 1.2.0+6
+version: 1.2.1+7
 
 environment:
   sdk: ^3.7.0
@@ -25,7 +25,8 @@ dependencies:
   geolocator: ^14.0.2
   geocoding: ^4.0.0
   sensors_plus: ^6.1.1
-  google_maps_flutter: ^2.12.3
+  flutter_map: ^8.2.2
+  latlong2: ^0.9.1
 
   # Rendering the photo + stamp overlay to a savable image
   path: ^1.9.0
