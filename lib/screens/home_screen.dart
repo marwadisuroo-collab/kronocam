@@ -4,6 +4,7 @@ import 'dart:math' as math;
 import 'dart:ui' as ui;
 
 import 'package:camera/camera.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
@@ -31,6 +32,44 @@ class HomeScreen extends StatefulWidget {
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
+Uint8List _compositeOverlayInIsolate(Map<String, dynamic> input) {
+  final photo = img.decodeImage(input['photo'] as Uint8List);
+  final overlay = img.decodeImage(input['overlay'] as Uint8List);
+  if (photo == null || overlay == null) return input['photo'] as Uint8List;
+
+  final uprightPhoto = img.bakeOrientation(photo);
+  final previewWidth = input['previewWidth'] as double;
+  final previewPixelRatio = input['previewPixelRatio'] as double;
+  final ratioX = input['ratioX'] as double;
+  final ratioY = input['ratioY'] as double;
+  final scale = uprightPhoto.width / (previewWidth * previewPixelRatio);
+  final overlayWidth = math.max(1, (overlay.width * scale).round());
+  final overlayHeight = math.max(1, (overlay.height * scale).round());
+  final resizedOverlay = img.copyResize(
+    overlay,
+    width: overlayWidth,
+    height: overlayHeight,
+    interpolation: img.Interpolation.cubic,
+  );
+  final x = (ratioX * uprightPhoto.width).round().clamp(
+    0,
+    math.max(0, uprightPhoto.width - overlayWidth),
+  ).toInt();
+  final y = (ratioY * uprightPhoto.height).round().clamp(
+    0,
+    math.max(0, uprightPhoto.height - overlayHeight),
+  ).toInt();
+  img.compositeImage(
+    uprightPhoto,
+    resizedOverlay,
+    dstX: x,
+    dstY: y,
+    dstW: overlayWidth,
+    dstH: overlayHeight,
+  );
+  return Uint8List.fromList(img.encodeJpg(uprightPhoto, quality: 95));
+}
+
 class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   CameraController? _controller;
   Future<void>? _initFuture;
@@ -50,6 +89,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   double _previewLogicalWidth = 1;
   double _overlayRotation = 0;
   Offset _overlayFraction = const Offset(0.04, 0.72);
+  double _minZoom = 1;
+  double _maxZoom = 1;
+  double _zoomLevel = 1;
+  double _zoomStart = 1;
   bool _modificationsUnlocked = false;
   bool _dateTimeModified = false;
 
@@ -95,6 +138,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       );
       _initFuture = _controller!.initialize();
       await _initFuture;
+      _minZoom = await _controller!.getMinZoomLevel();
+      _maxZoom = await _controller!.getMaxZoomLevel();
+      _zoomLevel = _minZoom.clamp(0.5, _maxZoom);
       if (mounted) setState(() {});
     } catch (e) {
       setState(() => _cameraError = 'Camera unavailable: $e');
@@ -169,7 +215,13 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     try {
       final xfile = await controller.takePicture();
       final file = File(xfile.path);
-      final stampedFile = await _stampCapturedPhoto(file);
+      final overlayRatio = _overlayFraction;
+      final previewWidth = _previewLogicalWidth;
+      final stampedFile = await _stampCapturedPhoto(
+        file,
+        ratio: overlayRatio,
+        previewWidth: previewWidth,
+      );
       // Keep the raw capture for the optional editor so editing never stamps
       // an already-stamped image a second time.
       setState(() => _lastCapturedFile = file);
@@ -191,7 +243,11 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     }
   }
 
-  Future<File> _stampCapturedPhoto(File source) async {
+  Future<File> _stampCapturedPhoto(
+    File source, {
+    required Offset ratio,
+    required double previewWidth,
+  }) async {
     if (!mounted) return source;
     final devicePixelRatio = MediaQuery.devicePixelRatioOf(context);
     await WidgetsBinding.instance.endOfFrame;
@@ -206,34 +262,20 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       format: ui.ImageByteFormat.png,
     );
     if (overlayData == null) return source;
-    final decoded = img.decodeImage(await source.readAsBytes());
-    if (decoded == null) return source;
-    final photo = img.bakeOrientation(decoded);
-    final overlay = img.decodeImage(overlayData.buffer.asUint8List());
-    if (overlay == null) return source;
-    final scale = photo.width /
-      (_previewLogicalWidth * devicePixelRatio);
-    final watermarkWidth = math.max(1, (overlay.width * scale).round());
-    final watermarkHeight = math.max(1, (overlay.height * scale).round());
-    final resized = img.copyResize(
-      overlay,
-      width: watermarkWidth,
-      height: watermarkHeight,
-      interpolation: img.Interpolation.cubic,
-    );
-    img.compositeImage(
-      photo,
-      resized,
-      dstX: (12 * scale).round(),
-      dstY: photo.height - watermarkHeight - (12 * scale).round(),
-      dstW: watermarkWidth,
-      dstH: watermarkHeight,
-    );
+    final photoBytes = await source.readAsBytes();
+    final outputBytes = await compute(_compositeOverlayInIsolate, {
+      'photo': photoBytes,
+      'overlay': overlayData.buffer.asUint8List(),
+      'previewWidth': previewWidth,
+      'previewPixelRatio': devicePixelRatio,
+      'ratioX': ratio.dx,
+      'ratioY': ratio.dy,
+    });
     final output = File(
       '${source.parent.path}/kronocam_stamped_${DateTime.now().microsecondsSinceEpoch}.jpg',
     );
     await output.writeAsBytes(
-      Uint8List.fromList(img.encodeJpg(photo, quality: 95)),
+      outputBytes,
       flush: true,
     );
     return output;
@@ -768,14 +810,29 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         if (snapshot.connectionState != ConnectionState.done) {
           return const Center(child: CircularProgressIndicator());
         }
-        return ClipRect(
-          child: FittedBox(
-            fit: BoxFit.cover,
-            alignment: Alignment.center,
-            child: SizedBox(
-              width: _controller!.value.previewSize?.height ?? 1,
-              height: _controller!.value.previewSize?.width ?? 1,
-              child: CameraPreview(_controller!),
+        return GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onScaleStart: (_) => _zoomStart = _zoomLevel,
+          onScaleUpdate: (details) {
+            if (details.scale == 1 || _maxZoom <= _minZoom) return;
+            final nextZoom = (_zoomStart * details.scale).clamp(
+              _minZoom,
+              _maxZoom,
+            );
+            if ((nextZoom - _zoomLevel).abs() < 0.01) return;
+            _zoomLevel = nextZoom;
+            _controller?.setZoomLevel(nextZoom);
+            if (mounted) setState(() {});
+          },
+          child: ClipRect(
+            child: FittedBox(
+              fit: BoxFit.cover,
+              alignment: Alignment.center,
+              child: SizedBox(
+                width: _controller!.value.previewSize?.height ?? 1,
+                height: _controller!.value.previewSize?.width ?? 1,
+                child: CameraPreview(_controller!),
+              ),
             ),
           ),
         );
