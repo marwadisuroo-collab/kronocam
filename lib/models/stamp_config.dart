@@ -10,6 +10,9 @@ class StampConfig {
   DateTime dateTime;
   StampPosition position;
   Color textColor;
+  Color backgroundColor;
+  String fontFamily;
+  double textSize;
   bool withBackground;
   bool showLocation;
   double? latitude;
@@ -24,6 +27,9 @@ class StampConfig {
     DateTime? dateTime,
     this.position = StampPosition.bottomLeft,
     this.textColor = Colors.white,
+    this.backgroundColor = const Color(0x73000000),
+    this.fontFamily = 'monospace',
+    this.textSize = 13,
     this.withBackground = true,
     this.showLocation = false,
     this.latitude,
@@ -39,6 +45,9 @@ class StampConfig {
     DateTime? dateTime,
     StampPosition? position,
     Color? textColor,
+    Color? backgroundColor,
+    String? fontFamily,
+    double? textSize,
     bool? withBackground,
     bool? showLocation,
     double? latitude,
@@ -53,6 +62,9 @@ class StampConfig {
       dateTime: dateTime ?? this.dateTime,
       position: position ?? this.position,
       textColor: textColor ?? this.textColor,
+      backgroundColor: backgroundColor ?? this.backgroundColor,
+      fontFamily: fontFamily ?? this.fontFamily,
+      textSize: textSize ?? this.textSize,
       withBackground: withBackground ?? this.withBackground,
       showLocation: showLocation ?? this.showLocation,
       latitude: latitude ?? this.latitude,

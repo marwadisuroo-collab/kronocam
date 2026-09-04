@@ -11,6 +11,7 @@ import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:sensors_plus/sensors_plus.dart';
+import 'package:geolocator/geolocator.dart';
 
 import '../provider/theme_provider.dart';
 import '../models/stamp_config.dart';
@@ -19,6 +20,7 @@ import '../services/location_service.dart';
 import '../widgets/stamp_overlay.dart';
 import '../widgets/watch_ad_dialog.dart';
 import 'edit_screen.dart';
+import 'map_screen.dart';
 import 'privacy_policy_screen.dart';
 
 class HomeScreen extends StatefulWidget {
@@ -42,6 +44,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   );
   Timer? _clockTimer;
   StreamSubscription<AccelerometerEvent>? _accelerometerSubscription;
+  StreamSubscription<Position>? _locationSubscription;
   double _overlayRotation = 0;
   Offset _overlayFraction = const Offset(0.04, 0.72);
   bool _modificationsUnlocked = false;
@@ -100,6 +103,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     WidgetsBinding.instance.removeObserver(this);
     _clockTimer?.cancel();
     _accelerometerSubscription?.cancel();
+    _locationSubscription?.cancel();
     _stampNotifier.dispose();
     _controller?.dispose();
     super.dispose();
@@ -109,7 +113,17 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     final cached = await LocationService.getCachedLocation();
     if (mounted && cached != null) _setLocation(cached);
     final fresh = await LocationService.getCurrentLocation();
-    if (mounted && fresh != null) _setLocation(fresh);
+    if (mounted && fresh != null) {
+      _setLocation(fresh);
+      _locationSubscription?.cancel();
+      _locationSubscription = LocationService.positionStream.listen((position) async {
+        final result = await LocationService.fromCoordinates(
+          position.latitude,
+          position.longitude,
+        );
+        if (mounted) _setLocation(result);
+      });
+    }
   }
 
   void _setLocation(LocationResult result) {
@@ -189,8 +203,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     final lines = _stampLines();
     if (lines.isEmpty) return source;
 
-    final scale = (photo.width / 1080.0).clamp(1.0, 4.0);
-    final font = img.arial14;
+    final scale = (photo.width / 1080.0).clamp(1.0, 4.0) *
+      (_stampConfig.textSize / 13.0);
+    final font = _stampConfig.textSize >= 18 ? img.arial24 : img.arial14;
     final lineHeight = (font.lineHeight * scale).round().clamp(16, 56).toInt();
     final horizontalPadding = (12 * scale).round();
     final verticalPadding = (8 * scale).round();
@@ -215,7 +230,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       y1: y,
       x2: x + boxWidth,
       y2: y + boxHeight,
-      color: img.ColorRgba8(0, 0, 0, 115),
+      color: _toImageColor(_stampConfig.backgroundColor),
     );
     final iconCenterX = x + horizontalPadding + (7 * scale).round();
     final iconCenterY = y + verticalPadding + (7 * scale).round();
@@ -224,7 +239,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       x: iconCenterX,
       y: iconCenterY,
       radius: (5 * scale).round().clamp(4, 32).toInt(),
-      color: img.ColorRgb8(255, 255, 255),
+      color: _toImageColor(_stampConfig.textColor),
     );
     img.drawPolygon(
       photo,
@@ -233,7 +248,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         img.Point(iconCenterX + (4 * scale).round(), iconCenterY + (3 * scale).round()),
         img.Point(iconCenterX, iconCenterY + (10 * scale).round()),
       ],
-      color: img.ColorRgb8(255, 255, 255),
+      color: _toImageColor(_stampConfig.textColor),
     );
     for (var index = 0; index < wrappedLines.length; index++) {
       img.drawString(
@@ -254,6 +269,16 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       flush: true,
     );
     return output;
+  }
+
+  img.ColorRgba8 _toImageColor(Color color) {
+    final value = color.toARGB32();
+    return img.ColorRgba8(
+      (value >> 16) & 0xff,
+      (value >> 8) & 0xff,
+      value & 0xff,
+      (value >> 24) & 0xff,
+    );
   }
 
   List<String> _wrapStampLines(
@@ -448,6 +473,80 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                         ),
                       ),
                       const SizedBox(height: 12),
+                      const Text(
+                        'Free visual customization',
+                        style: TextStyle(fontWeight: FontWeight.w800),
+                      ),
+                      DropdownButtonFormField<String>(
+                        initialValue: _stampConfig.fontFamily,
+                        decoration: const InputDecoration(labelText: 'Font family'),
+                        items: const [
+                          DropdownMenuItem(value: 'monospace', child: Text('Monospace')),
+                          DropdownMenuItem(value: 'sans-serif', child: Text('Sans serif')),
+                          DropdownMenuItem(value: 'serif', child: Text('Serif')),
+                        ],
+                        onChanged: (value) {
+                          if (value == null) return;
+                          setState(() => _setStampConfig(_stampConfig.copyWith(fontFamily: value)));
+                          setModalState(() {});
+                        },
+                      ),
+                      Row(
+                        children: [
+                          const Text('Text size'),
+                          Expanded(
+                            child: Slider(
+                              min: 10,
+                              max: 22,
+                              divisions: 12,
+                              value: _stampConfig.textSize,
+                              label: '${_stampConfig.textSize.round()}px',
+                              onChanged: (value) {
+                                setState(() => _setStampConfig(_stampConfig.copyWith(textSize: value)));
+                                setModalState(() {});
+                              },
+                            ),
+                          ),
+                        ],
+                      ),
+                      Row(
+                        children: [
+                          const Text('Text color'),
+                          const SizedBox(width: 12),
+                          ..._colorChoices((color) {
+                            setState(() => _setStampConfig(_stampConfig.copyWith(textColor: color)));
+                            setModalState(() {});
+                          }, _stampConfig.textColor),
+                        ],
+                      ),
+                      Row(
+                        children: [
+                          const Text('Box color'),
+                          const SizedBox(width: 12),
+                          ..._colorChoices((color) {
+                            setState(() => _setStampConfig(_stampConfig.copyWith(backgroundColor: color)));
+                            setModalState(() {});
+                          }, _stampConfig.backgroundColor),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+                      SizedBox(
+                        width: double.infinity,
+                        child: OutlinedButton.icon(
+                          icon: const Icon(Icons.map_outlined),
+                          label: const Text('Change Location via Map'),
+                          onPressed: () async {
+                            final result = await Navigator.push<LocationResult>(
+                              context,
+                              MaterialPageRoute(
+                                builder: (_) => MapScreen(initialLocation: _liveLocation),
+                              ),
+                            );
+                            if (mounted && result != null) _setLocation(result);
+                            if (context.mounted) setModalState(() {});
+                          },
+                        ),
+                      ),
                       _previewAction(
                         'Modify Date',
                         Icons.calendar_month,
@@ -505,6 +604,27 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         trailing: const Icon(Icons.lock_outline, size: 18),
         onTap: onTap,
       );
+
+  List<Widget> _colorChoices(ValueChanged<Color> onSelected, Color selected) {
+    const colors = [Colors.white, Colors.black, Colors.red, Colors.yellow, Colors.cyan];
+    return colors
+        .map(
+          (color) => Padding(
+            padding: const EdgeInsets.only(right: 6),
+            child: GestureDetector(
+              onTap: () => onSelected(color),
+              child: CircleAvatar(
+                radius: 14,
+                backgroundColor: color,
+                child: selected.toARGB32() == color.toARGB32()
+                    ? const Icon(Icons.check, size: 16, color: Colors.grey)
+                    : null,
+              ),
+            ),
+          ),
+        )
+        .toList();
+        }
 
   Future<void> _unlock(Future<void> Function() action) async {
     if (_modificationsUnlocked) {

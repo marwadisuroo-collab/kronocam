@@ -14,6 +14,20 @@ class LocationResult {
 }
 
 class LocationService {
+  static Stream<Position> get positionStream => Geolocator.getPositionStream(
+    locationSettings: const LocationSettings(
+      accuracy: LocationAccuracy.high,
+      distanceFilter: 5,
+    ),
+  );
+
+  static Future<LocationResult> fromCoordinates(
+    double latitude,
+    double longitude,
+  ) async {
+    return _toResultValues(latitude, longitude);
+  }
+
   static Future<LocationResult?> getCachedLocation() async {
     try {
       final position = await Geolocator.getLastKnownPosition();
@@ -54,18 +68,25 @@ class LocationService {
         if (cached == null) rethrow;
         position = cached;
       }
-      return _toResult(position);
+      return await _toResult(position);
     } catch (_) {
       return null;
     }
   }
 
   static Future<LocationResult> _toResult(Position position) async {
+    return _toResultValues(position.latitude, position.longitude);
+  }
+
+  static Future<LocationResult> _toResultValues(
+    double latitude,
+    double longitude,
+  ) async {
     String? address;
     try {
       final placemarks = await placemarkFromCoordinates(
-        position.latitude,
-        position.longitude,
+          latitude,
+          longitude,
       );
       if (placemarks.isNotEmpty) {
         final place = placemarks.first;
@@ -79,8 +100,8 @@ class LocationService {
       }
     } catch (_) {}
     return LocationResult(
-      latitude: position.latitude,
-      longitude: position.longitude,
+      latitude: latitude,
+      longitude: longitude,
       address: address,
     );
   }

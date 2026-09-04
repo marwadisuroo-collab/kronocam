@@ -71,8 +71,8 @@ class StampOverlay extends StatelessWidget {
                         : TextAlign.center,
                 style: TextStyle(
                   color: config.textColor,
-                  fontSize: isLandscape ? 12 : 13,
-                  fontFamily: 'monospace',
+                  fontSize: (isLandscape ? 12 : config.textSize),
+                  fontFamily: config.fontFamily,
                   fontWeight:
                       line.startsWith('Project:')
                           ? FontWeight.w700
@@ -100,7 +100,7 @@ class StampOverlay extends StatelessWidget {
         decoration:
             config.withBackground
                 ? BoxDecoration(
-                  color: Colors.black.withValues(alpha: 0.45),
+                  color: config.backgroundColor,
                   borderRadius: BorderRadius.circular(10),
                 )
                 : null,
