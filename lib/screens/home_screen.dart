@@ -1,15 +1,23 @@
+import 'dart:async';
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:camera/camera.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/material.dart';
+import 'package:image/image.dart' as img;
 import 'package:image_picker/image_picker.dart';
+import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 import 'package:share_plus/share_plus.dart';
+import 'package:sensors_plus/sensors_plus.dart';
 
 import '../provider/theme_provider.dart';
+import '../models/stamp_config.dart';
 import '../services/gallery_service.dart';
 import '../services/location_service.dart';
+import '../widgets/stamp_overlay.dart';
+import '../widgets/watch_ad_dialog.dart';
 import 'edit_screen.dart';
 import 'privacy_policy_screen.dart';
 
@@ -28,6 +36,16 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   bool _capturing = false;
   bool _showLiveLocation = false;
   LocationResult? _liveLocation;
+  StampConfig _stampConfig = StampConfig(showLocation: true);
+  late final ValueNotifier<StampConfig> _stampNotifier = ValueNotifier(
+    _stampConfig,
+  );
+  Timer? _clockTimer;
+  StreamSubscription<AccelerometerEvent>? _accelerometerSubscription;
+  double _overlayRotation = 0;
+  Offset _overlayFraction = const Offset(0.04, 0.72);
+  bool _modificationsUnlocked = false;
+  bool _dateTimeModified = false;
 
   final ImagePicker _picker = ImagePicker();
 
@@ -35,7 +53,22 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _clockTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (mounted && !_dateTimeModified) {
+        _setStampConfig(_stampConfig.copyWith(dateTime: DateTime.now()));
+      }
+    });
     _initCamera();
+    _loadLocationOnLaunch();
+    _accelerometerSubscription = accelerometerEventStream().listen((event) {
+      final nextRotation =
+          event.x.abs() > event.y.abs()
+              ? (event.x > 0 ? math.pi / 2 : -math.pi / 2)
+              : (event.y > 0 ? 0.0 : math.pi);
+      if (mounted && nextRotation != _overlayRotation) {
+        setState(() => _overlayRotation = nextRotation);
+      }
+    });
   }
 
   Future<void> _initCamera() async {
@@ -65,8 +98,38 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _clockTimer?.cancel();
+    _accelerometerSubscription?.cancel();
+    _stampNotifier.dispose();
     _controller?.dispose();
     super.dispose();
+  }
+
+  Future<void> _loadLocationOnLaunch() async {
+    final cached = await LocationService.getCachedLocation();
+    if (mounted && cached != null) _setLocation(cached);
+    final fresh = await LocationService.getCurrentLocation();
+    if (mounted && fresh != null) _setLocation(fresh);
+  }
+
+  void _setLocation(LocationResult result) {
+    setState(() {
+      _liveLocation = result;
+      _showLiveLocation = true;
+      _setStampConfig(
+        _stampConfig.copyWith(
+          showLocation: true,
+          latitude: result.latitude,
+          longitude: result.longitude,
+          address: result.address,
+        ),
+      );
+    });
+  }
+
+  void _setStampConfig(StampConfig config) {
+    _stampConfig = config;
+    _stampNotifier.value = config;
   }
 
   @override
@@ -89,28 +152,18 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     try {
       final xfile = await controller.takePicture();
       final file = File(xfile.path);
-      final bytes = await file.readAsBytes();
-
-      // Save the CLEAN photo (no stamp) straight to the gallery.
-      final saved = await GalleryService.saveBytes(
-        bytes,
-        name: 'KronoCam_${DateTime.now().millisecondsSinceEpoch}',
-      );
-
+      final stampedFile = await _stampCapturedPhoto(file);
+      // Keep the raw capture for the optional editor so editing never stamps
+      // an already-stamped image a second time.
       setState(() => _lastCapturedFile = file);
 
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            saved ? 'Photo saved' : 'Photo captured (save failed)',
-          ),
-          action: SnackBarAction(
-            label: 'Add Stamp',
-            onPressed: () => _openEditor(file),
-          ),
-        ),
+      final saved = await GalleryService.saveBytes(
+        await stampedFile.readAsBytes(),
+        name: 'KronoCam_${DateTime.now().millisecondsSinceEpoch}',
       );
+      if (!mounted) return;
+      _showCaptureOptions(file, saved: saved);
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(
@@ -121,10 +174,197 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     }
   }
 
-  void _openEditor(File file) {
+  Future<File> _stampCapturedPhoto(File source) async {
+    final sourceBytes = await source.readAsBytes();
+    var decoded = img.decodeImage(sourceBytes);
+    decoded ??= img.decodeJpg(sourceBytes);
+    if (decoded == null) return source;
+    var photo = img.bakeOrientation(decoded);
+    if (photo.width < 100 || photo.height < 100) return source;
+    final shouldBeLandscape = _overlayRotation.abs() > 0.8;
+    final isLandscape = photo.width > photo.height;
+    if (shouldBeLandscape != isLandscape) {
+      photo = img.copyRotate(photo, angle: 90);
+    }
+    final lines = _stampLines();
+    if (lines.isEmpty) return source;
+
+    final scale = (photo.width / 1080.0).clamp(1.0, 4.0);
+    final font = img.arial14;
+    final lineHeight = (font.lineHeight * scale).round().clamp(16, 56).toInt();
+    final horizontalPadding = (12 * scale).round();
+    final verticalPadding = (8 * scale).round();
+    final boxWidth = math.min(
+      photo.width - horizontalPadding * 2,
+      (300 * scale).round(),
+    ).toInt();
+    final wrappedLines = _wrapStampLines(lines, boxWidth, font, scale);
+    final boxHeight = wrappedLines.length * lineHeight + verticalPadding * 2;
+    final x = ((_overlayFraction.dx * photo.width).round()).clamp(
+      0,
+      photo.width - boxWidth,
+    ).toInt();
+    final y = ((_overlayFraction.dy * photo.height).round()).clamp(
+      0,
+      photo.height - boxHeight,
+    ).toInt();
+
+    img.drawRect(
+      photo,
+      x1: x,
+      y1: y,
+      x2: x + boxWidth,
+      y2: y + boxHeight,
+      color: img.ColorRgba8(0, 0, 0, 115),
+    );
+    final iconCenterX = x + horizontalPadding + (7 * scale).round();
+    final iconCenterY = y + verticalPadding + (7 * scale).round();
+    img.drawCircle(
+      photo,
+      x: iconCenterX,
+      y: iconCenterY,
+      radius: (5 * scale).round().clamp(4, 32).toInt(),
+      color: img.ColorRgb8(255, 255, 255),
+    );
+    img.drawPolygon(
+      photo,
+      vertices: [
+        img.Point(iconCenterX - (4 * scale).round(), iconCenterY + (3 * scale).round()),
+        img.Point(iconCenterX + (4 * scale).round(), iconCenterY + (3 * scale).round()),
+        img.Point(iconCenterX, iconCenterY + (10 * scale).round()),
+      ],
+      color: img.ColorRgb8(255, 255, 255),
+    );
+    for (var index = 0; index < wrappedLines.length; index++) {
+      img.drawString(
+        photo,
+        wrappedLines[index],
+        font: font,
+        x: x + horizontalPadding + (index == 0 ? (16 * scale).round() : 0),
+        y: y + verticalPadding + index * lineHeight,
+        color: img.ColorRgb8(255, 255, 255),
+      );
+    }
+
+    final output = File(
+      '${source.parent.path}/kronocam_stamped_${DateTime.now().microsecondsSinceEpoch}.jpg',
+    );
+    await output.writeAsBytes(
+      Uint8List.fromList(img.encodeJpg(photo, quality: 95)),
+      flush: true,
+    );
+    return output;
+  }
+
+  List<String> _wrapStampLines(
+    List<String> lines,
+    int boxWidth,
+    img.BitmapFont font,
+    double scale,
+  ) {
+    final maxCharacters = math.max(
+      12,
+      ((boxWidth - 24 * scale) / (8 * scale)).floor(),
+    );
+    final wrapped = <String>[];
+    for (final line in lines) {
+      if (line.length <= maxCharacters) {
+        wrapped.add(line);
+        continue;
+      }
+      var remaining = line;
+      while (remaining.length > maxCharacters) {
+        var split = remaining.lastIndexOf(' ', maxCharacters);
+        if (split < 1) split = maxCharacters;
+        wrapped.add(remaining.substring(0, split));
+        remaining = remaining.substring(split).trimLeft();
+      }
+      if (remaining.isNotEmpty) wrapped.add(remaining);
+    }
+    return wrapped;
+  }
+
+  List<String> _stampLines() {
+    final lines = <String>['Kronocam'];
+    lines.add('Project: ${_stampConfig.projectName.trim()}');
+    if (_stampConfig.showLocation &&
+        _stampConfig.address?.trim().isNotEmpty == true) {
+      lines.add('Address: ${_stampConfig.address!.trim()}');
+    }
+    if (_stampConfig.showLocation &&
+        _stampConfig.latitude != null &&
+        _stampConfig.longitude != null) {
+      lines.add('Latitude: ${_stampConfig.latitude!.toStringAsFixed(5)}');
+      lines.add('Longitude: ${_stampConfig.longitude!.toStringAsFixed(5)}');
+    }
+    final dateLine = <String>[];
+    if (_stampConfig.showDay) {
+      dateLine.add(DateFormat('EEEE').format(_stampConfig.dateTime));
+    }
+    if (_stampConfig.showDate) {
+      dateLine.add(
+        '${_stampConfig.dateTime.day.toString().padLeft(2, '0')}/${_stampConfig.dateTime.month.toString().padLeft(2, '0')}/${_stampConfig.dateTime.year}',
+      );
+    }
+    if (_stampConfig.showTime) {
+      dateLine.add(
+        '${_stampConfig.dateTime.hour.toString().padLeft(2, '0')}:${_stampConfig.dateTime.minute.toString().padLeft(2, '0')}',
+      );
+    }
+    if (dateLine.isNotEmpty) lines.add(dateLine.join('  '));
+    return lines;
+  }
+
+  void _openEditor(File file, {bool autoSave = false}) {
     Navigator.push(
       context,
-      MaterialPageRoute(builder: (_) => EditScreen(imageFile: file)),
+      MaterialPageRoute(
+        builder:
+            (_) => EditScreen(
+              imageFile: file,
+              initialConfig: _stampConfig,
+              autoSave: autoSave,
+            ),
+      ),
+    );
+  }
+
+  Future<void> _showCaptureOptions(File file, {required bool saved}) async {
+    await showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      builder:
+          (sheetContext) => SafeArea(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(20, 4, 20, 20),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: Text(
+                      saved ? 'Photo saved to Gallery' : 'Photo captured',
+                      style: TextStyle(
+                        fontSize: 20,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: const Icon(Icons.tune),
+                    title: const Text('Edit Stamp Later'),
+                    subtitle: const Text('Modify the raw captured photo'),
+                    onTap: () {
+                      Navigator.pop(sheetContext);
+                      _openEditor(file);
+                    },
+                  ),
+                ],
+              ),
+            ),
+          ),
     );
   }
 
@@ -161,20 +401,180 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     if (!mounted) return;
     if (result == null) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Location unavailable or permission denied.')),
+        const SnackBar(
+          content: Text('Location unavailable or permission denied.'),
+        ),
       );
       return;
     }
-    setState(() {
-      _liveLocation = result;
-      _showLiveLocation = true;
-    });
+    _setLocation(result);
+  }
+
+  Future<void> _openPreviewSettings() async {
+    final projectController = TextEditingController(
+      text: _stampConfig.projectName,
+    );
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder:
+          (modalContext) => Padding(
+            padding: EdgeInsets.fromLTRB(
+              20,
+              8,
+              20,
+              MediaQuery.viewInsetsOf(modalContext).bottom + 20,
+            ),
+            child: StatefulBuilder(
+              builder:
+                  (context, setModalState) => Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        'Preview Setting',
+                        style: TextStyle(
+                          fontSize: 21,
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                      const SizedBox(height: 16),
+                      TextField(
+                        controller: projectController,
+                        decoration: const InputDecoration(
+                          labelText: 'Project',
+                          border: OutlineInputBorder(),
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      _previewAction(
+                        'Modify Date',
+                        Icons.calendar_month,
+                        () async {
+                          await _unlock(() => _pickDate(modalContext));
+                          setModalState(() {});
+                        },
+                      ),
+                      _previewAction('Modify Time', Icons.schedule, () async {
+                        await _unlock(() => _pickTime(modalContext));
+                        setModalState(() {});
+                      }),
+                      _previewAction(
+                        'Modify Location',
+                        Icons.location_on_outlined,
+                        () async {
+                          await _unlock(() async {
+                            final result =
+                                await LocationService.getCurrentLocation();
+                            if (mounted && result != null) _setLocation(result);
+                          });
+                          setModalState(() {});
+                        },
+                      ),
+                      const SizedBox(height: 8),
+                      SizedBox(
+                        width: double.infinity,
+                        child: FilledButton(
+                          onPressed: () {
+                            setState(
+                              () => _setStampConfig(
+                                _stampConfig.copyWith(
+                                  projectName: projectController.text,
+                                ),
+                              ),
+                            );
+                            Navigator.pop(modalContext);
+                          },
+                          child: const Text('Done'),
+                        ),
+                      ),
+                    ],
+                  ),
+            ),
+          ),
+    );
+    projectController.dispose();
+  }
+
+  Widget _previewAction(String label, IconData icon, VoidCallback onTap) =>
+      ListTile(
+        contentPadding: EdgeInsets.zero,
+        leading: Icon(icon),
+        title: Text(label),
+        trailing: const Icon(Icons.lock_outline, size: 18),
+        onTap: onTap,
+      );
+
+  Future<void> _unlock(Future<void> Function() action) async {
+    if (_modificationsUnlocked) {
+      await action();
+      return;
+    }
+    var rewarded = false;
+    await showWatchAdToUnlockDialog(
+      context,
+      onUnlocked: () async {
+        rewarded = true;
+        await action();
+      },
+    );
+    if (mounted && rewarded) setState(() => _modificationsUnlocked = true);
+  }
+
+  Future<void> _pickDate(BuildContext context) async {
+    final value = await showDatePicker(
+      context: context,
+      initialDate: _stampConfig.dateTime,
+      firstDate: DateTime(2000),
+      lastDate: DateTime(2100),
+    );
+    if (value != null && mounted) {
+      setState(() {
+        _dateTimeModified = true;
+        _setStampConfig(
+          _stampConfig.copyWith(
+            dateTime: DateTime(
+              value.year,
+              value.month,
+              value.day,
+              _stampConfig.dateTime.hour,
+              _stampConfig.dateTime.minute,
+            ),
+          ),
+        );
+      });
+    }
+  }
+
+  Future<void> _pickTime(BuildContext context) async {
+    final value = await showTimePicker(
+      context: context,
+      initialTime: TimeOfDay.fromDateTime(_stampConfig.dateTime),
+    );
+    if (value != null && mounted) {
+      setState(() {
+        _dateTimeModified = true;
+        _setStampConfig(
+          _stampConfig.copyWith(
+            dateTime: DateTime(
+              _stampConfig.dateTime.year,
+              _stampConfig.dateTime.month,
+              _stampConfig.dateTime.day,
+              value.hour,
+              value.minute,
+            ),
+          ),
+        );
+      });
+    }
   }
 
   Future<void> _shareApp() async {
     try {
-      final apkPath = await MethodChannel('com.kronocam.app/share_apk')
-          .invokeMethod<String>('getApkPath');
+      final apkPath = await MethodChannel(
+        'com.kronocam.app/share_apk',
+      ).invokeMethod<String>('getApkPath');
       if (apkPath != null && apkPath.isNotEmpty) {
         await SharePlus.instance.share(
           ShareParams(
@@ -188,7 +588,14 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       // Fall through to a text share when the installed APK path is unavailable.
     }
     await SharePlus.instance.share(
-      ShareParams(text: 'Try KronoCam - Timestamp Camera.'),
+      ShareParams(
+        text:
+            'KronoCam - Timestamp Camera\n\n'
+            'Capture photos with live date, time, GPS coordinates, address '
+            'and project stamps. Edit date, time, location and project name, '
+            'then save the stamped photo to your gallery.\n\n'
+            'Made by Shubham.',
+      ),
     );
   }
 
@@ -217,91 +624,101 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
             onPressed: _toggleLiveLocation,
           ),
           Builder(
-            builder: (ctx) => IconButton(
-              icon: const Icon(Icons.menu),
-              onPressed: () => Scaffold.of(ctx).openEndDrawer(),
-            ),
+            builder:
+                (ctx) => IconButton(
+                  icon: const Icon(Icons.menu),
+                  onPressed: () => Scaffold.of(ctx).openEndDrawer(),
+                ),
           ),
         ],
       ),
-      body: Stack(
-        fit: StackFit.expand,
-        children: [
-          _buildCameraPreview(),
-          if (_showLiveLocation && _liveLocation != null)
-            Positioned(
-              left: 18,
-              top: 18,
-              child: DecoratedBox(
-                decoration: BoxDecoration(
-                  color: Colors.black.withValues(alpha: 0.68),
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
-                  child: DefaultTextStyle(
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 13,
-                      fontFamily: 'monospace',
-                      height: 1.35,
-                    ),
-                    child: Text(
-                      'Latitude: ${_liveLocation!.latitude.toStringAsFixed(5)}°\n'
-                      'Longitude: ${_liveLocation!.longitude.toStringAsFixed(5)}°',
+      body: OrientationBuilder(
+        builder:
+            (context, orientation) => Stack(
+              fit: StackFit.expand,
+              children: [
+                _buildCameraPreview(),
+                if (_showLiveLocation && _liveLocation != null)
+                  Positioned.fill(
+                    child: LayoutBuilder(
+                      builder: (context, constraints) {
+                        final size = constraints.biggest;
+                        final position = Offset(
+                          _overlayFraction.dx * size.width,
+                          _overlayFraction.dy * size.height,
+                        );
+                        return Stack(
+                          children: [
+                            Positioned(
+                              left: position.dx,
+                              top: position.dy,
+                              child: GestureDetector(
+                                onTap: _openPreviewSettings,
+                                onPanUpdate: (details) {
+                                  setState(() {
+                                    _overlayFraction = Offset(
+                                      (_overlayFraction.dx +
+                                              details.delta.dx / size.width)
+                                          .clamp(0.0, 0.95),
+                                      (_overlayFraction.dy +
+                                              details.delta.dy / size.height)
+                                          .clamp(0.0, 0.95),
+                                    );
+                                  });
+                                },
+                                child: Transform.rotate(
+                                  angle: _overlayRotation,
+                                  child: ValueListenableBuilder<StampConfig>(
+                                    valueListenable: _stampNotifier,
+                                    builder:
+                                        (context, config, _) => StampOverlay(
+                                          config: config,
+                                        ),
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ],
+                        );
+                      },
                     ),
                   ),
-                ),
-              ),
+                if (orientation == Orientation.landscape)
+                  Positioned(
+                    top: 0,
+                    right: 12,
+                    bottom: 0,
+                    child: _buildLandscapeControls(),
+                  )
+                else
+                  Positioned(
+                    left: 0,
+                    right: 0,
+                    bottom: 28,
+                    child: Center(child: _buildShutter()),
+                  ),
+                if (_lastCapturedFile != null)
+                  Positioned(
+                    left: orientation == Orientation.landscape ? 20 : 20,
+                    bottom: orientation == Orientation.landscape ? 20 : 40,
+                    child: GestureDetector(
+                      onTap: () => _openEditor(_lastCapturedFile!),
+                      child: Container(
+                        width: 52,
+                        height: 52,
+                        decoration: BoxDecoration(
+                          borderRadius: BorderRadius.circular(10),
+                          border: Border.all(color: Colors.white70, width: 1.5),
+                          image: DecorationImage(
+                            image: FileImage(_lastCapturedFile!),
+                            fit: BoxFit.cover,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+              ],
             ),
-          Positioned(
-            left: 0,
-            right: 0,
-            bottom: 28,
-            child: Center(
-              child: GestureDetector(
-                onTap: _capture,
-                child: Container(
-                  width: 74,
-                  height: 74,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    border: Border.all(color: Colors.white, width: 4),
-                  ),
-                  padding: const EdgeInsets.all(4),
-                  child: Container(
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      color: _capturing
-                          ? Colors.white38
-                          : ThemeProvider.accent,
-                    ),
-                  ),
-                ),
-              ),
-            ),
-          ),
-          if (_lastCapturedFile != null)
-            Positioned(
-              left: 20,
-              bottom: 40,
-              child: GestureDetector(
-                onTap: () => _openEditor(_lastCapturedFile!),
-                child: Container(
-                  width: 52,
-                  height: 52,
-                  decoration: BoxDecoration(
-                    borderRadius: BorderRadius.circular(10),
-                    border: Border.all(color: Colors.white70, width: 1.5),
-                    image: DecorationImage(
-                      image: FileImage(_lastCapturedFile!),
-                      fit: BoxFit.cover,
-                    ),
-                  ),
-                ),
-              ),
-            ),
-        ],
       ),
     );
   }
@@ -329,15 +746,13 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           return const Center(child: CircularProgressIndicator());
         }
         return ClipRect(
-          child: OverflowBox(
+          child: FittedBox(
+            fit: BoxFit.cover,
             alignment: Alignment.center,
-            child: FittedBox(
-              fit: BoxFit.cover,
-              child: SizedBox(
-                width: _controller!.value.previewSize?.height ?? 1,
-                height: _controller!.value.previewSize?.width ?? 1,
-                child: CameraPreview(_controller!),
-              ),
+            child: SizedBox(
+              width: _controller!.value.previewSize?.height ?? 1,
+              height: _controller!.value.previewSize?.width ?? 1,
+              child: CameraPreview(_controller!),
             ),
           ),
         );
@@ -345,7 +760,62 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     );
   }
 
-  Widget _buildMenu(BuildContext context, ThemeProvider theme, bool isDarkMode) {
+  Widget _buildShutter() => GestureDetector(
+    onTap: _capture,
+    child: Container(
+      width: 74,
+      height: 74,
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        border: Border.all(color: Colors.white, width: 4),
+      ),
+      padding: const EdgeInsets.all(4),
+      child: Container(
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          color: _capturing ? Colors.white38 : ThemeProvider.accent,
+        ),
+      ),
+    ),
+  );
+
+  Widget _buildLandscapeControls() => Column(
+    mainAxisAlignment: MainAxisAlignment.center,
+    children: [
+      AnimatedRotation(
+        turns: 0.25,
+        duration: const Duration(milliseconds: 220),
+        child: IconButton(
+          onPressed: _toggleLiveLocation,
+          icon: Icon(
+            _showLiveLocation ? Icons.location_on : Icons.location_off,
+          ),
+          color: _showLiveLocation ? ThemeProvider.accent : Colors.white,
+        ),
+      ),
+      const SizedBox(height: 16),
+      _buildShutter(),
+      const SizedBox(height: 16),
+      AnimatedRotation(
+        turns: 0.25,
+        duration: const Duration(milliseconds: 220),
+        child: Builder(
+          builder:
+              (context) => IconButton(
+                onPressed: () => Scaffold.of(context).openEndDrawer(),
+                icon: const Icon(Icons.settings_outlined),
+                color: Colors.white,
+              ),
+        ),
+      ),
+    ],
+  );
+
+  Widget _buildMenu(
+    BuildContext context,
+    ThemeProvider theme,
+    bool isDarkMode,
+  ) {
     final bg = isDarkMode ? const Color(0xFF141416) : Colors.white;
     final textColor = isDarkMode ? Colors.white : Colors.black87;
 
@@ -385,7 +855,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
             ListTile(
               leading: const Icon(Icons.edit_calendar_outlined),
               title: const Text('Modify Date / Time / Day'),
-              subtitle: const Text('Edit the stamp on your latest photo'),
+              subtitle: const Text('Edit your stamp after watching an ad'),
               onTap: _modifyLatest,
             ),
             ListTile(
@@ -417,7 +887,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                 Navigator.pop(context);
                 Navigator.push(
                   context,
-                  MaterialPageRoute(builder: (_) => const PrivacyPolicyScreen()),
+                  MaterialPageRoute(
+                    builder: (_) => const PrivacyPolicyScreen(),
+                  ),
                 );
               },
             ),

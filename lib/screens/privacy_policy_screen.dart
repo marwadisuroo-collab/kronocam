@@ -45,9 +45,8 @@ class PrivacyPolicyScreen extends StatelessWidget {
             'KronoCam lets you capture photos with your device camera or '
                 'select existing photos from your gallery, and add a '
                 'customizable date, time, day and project-name stamp to '
-                'them. Photos you capture are saved to your device '
-                'without any stamp; stamped copies are only created when '
-                'you choose to edit and save them.',
+                'them. Captured photos and stamped copies are processed and '
+                'saved on your device when you choose to capture or save them.',
           ),
           _section(
             textColor,
@@ -60,6 +59,17 @@ class PrivacyPolicyScreen extends StatelessWidget {
                 'KronoCam does not access your camera or photo library in '
                 'the background, and does not read photos you have not '
                 'chosen to open in the app.',
+          ),
+          _section(
+            textColor,
+            subColor,
+            'Location information',
+            'If you grant location permission, KronoCam reads your current '
+                'GPS coordinates while the camera screen is open and may '
+                'reverse-geocode them into an address for the stamp. Location '
+                'data is used only for the photo metadata and is not uploaded '
+                'to a KronoCam server. You can disable access at any time in '
+                'your device settings.',
           ),
           _section(
             textColor,
@@ -90,6 +100,23 @@ class PrivacyPolicyScreen extends StatelessWidget {
                 'stamp) happens entirely on your device. KronoCam does '
                 'not upload your photos to any server.',
           ),
+                  _section(
+                textColor,
+                subColor,
+                'Security and children',
+                'KronoCam does not create user accounts or maintain a personal '
+                    'online profile. The app is not intended to collect personal '
+                    'information from children. Keep your device and operating '
+                    'system updated to help protect locally stored photos.',
+                  ),
+                  _section(
+                textColor,
+                subColor,
+                'Changes to this policy',
+                'This policy may be updated when the app features, permissions or '
+                    'advertising providers change. The latest version is shown '
+                    'inside the app with its update year.',
+                  ),
           _section(
             textColor,
             subColor,

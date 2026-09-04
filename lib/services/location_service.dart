@@ -14,6 +14,19 @@ class LocationResult {
 }
 
 class LocationService {
+  static Future<LocationResult?> getCachedLocation() async {
+    try {
+      final position = await Geolocator.getLastKnownPosition();
+      if (position == null) return null;
+      return LocationResult(
+        latitude: position.latitude,
+        longitude: position.longitude,
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
   static Future<LocationResult?> getCurrentLocation() async {
     try {
       if (!await Geolocator.isLocationServiceEnabled()) return null;
@@ -27,34 +40,48 @@ class LocationService {
         return null;
       }
 
-      final position = await Geolocator.getCurrentPosition();
-      String? address;
+      // Use the last fix immediately, then prefer a fresh high-accuracy fix.
+      final cached = await Geolocator.getLastKnownPosition();
+      Position position;
       try {
-        final placemarks = await placemarkFromCoordinates(
-          position.latitude,
-          position.longitude,
+        position = await Geolocator.getCurrentPosition(
+          locationSettings: const LocationSettings(
+            accuracy: LocationAccuracy.high,
+            timeLimit: Duration(seconds: 8),
+          ),
         );
-        if (placemarks.isNotEmpty) {
-          final place = placemarks.first;
-          final parts = <String>[
-            if ((place.locality ?? '').trim().isNotEmpty) place.locality!.trim(),
-            if ((place.administrativeArea ?? '').trim().isNotEmpty)
-              place.administrativeArea!.trim(),
-            if ((place.country ?? '').trim().isNotEmpty) place.country!.trim(),
-          ];
-          if (parts.isNotEmpty) address = parts.join(', ');
-        }
       } catch (_) {
-        // Coordinates are still useful when reverse geocoding is unavailable.
+        if (cached == null) rethrow;
+        position = cached;
       }
-
-      return LocationResult(
-        latitude: position.latitude,
-        longitude: position.longitude,
-        address: address,
-      );
+      return _toResult(position);
     } catch (_) {
       return null;
     }
+  }
+
+  static Future<LocationResult> _toResult(Position position) async {
+    String? address;
+    try {
+      final placemarks = await placemarkFromCoordinates(
+        position.latitude,
+        position.longitude,
+      );
+      if (placemarks.isNotEmpty) {
+        final place = placemarks.first;
+        final parts = <String>[
+          if ((place.locality ?? '').trim().isNotEmpty) place.locality!.trim(),
+          if ((place.administrativeArea ?? '').trim().isNotEmpty)
+            place.administrativeArea!.trim(),
+          if ((place.country ?? '').trim().isNotEmpty) place.country!.trim(),
+        ];
+        if (parts.isNotEmpty) address = parts.join(', ');
+      }
+    } catch (_) {}
+    return LocationResult(
+      latitude: position.latitude,
+      longitude: position.longitude,
+      address: address,
+    );
   }
 }

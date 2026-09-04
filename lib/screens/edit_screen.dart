@@ -15,8 +15,15 @@ import '../widgets/watch_ad_dialog.dart';
 
 class EditScreen extends StatefulWidget {
   final File imageFile;
+  final StampConfig? initialConfig;
+  final bool autoSave;
 
-  const EditScreen({super.key, required this.imageFile});
+  const EditScreen({
+    super.key,
+    required this.imageFile,
+    this.initialConfig,
+    this.autoSave = false,
+  });
 
   @override
   State<EditScreen> createState() => _EditScreenState();
@@ -24,10 +31,9 @@ class EditScreen extends StatefulWidget {
 
 class _EditScreenState extends State<EditScreen> {
   final GlobalKey _repaintKey = GlobalKey();
-  final TextEditingController _projectNameController =
-      TextEditingController();
+  final TextEditingController _projectNameController = TextEditingController();
 
-  StampConfig _config = StampConfig();
+  late StampConfig _config;
   bool _unlocked = false;
   bool _saving = false;
   bool _loadingLocation = false;
@@ -38,7 +44,8 @@ class _EditScreenState extends State<EditScreen> {
   void dispose() {
     _projectNameController.dispose();
     final normalizedFile = _displayImageFile;
-    if (normalizedFile != null && normalizedFile.path != widget.imageFile.path) {
+    if (normalizedFile != null &&
+        normalizedFile.path != widget.imageFile.path) {
       normalizedFile.delete().ignore();
     }
     super.dispose();
@@ -47,12 +54,16 @@ class _EditScreenState extends State<EditScreen> {
   @override
   void initState() {
     super.initState();
+    _config = widget.initialConfig ?? StampConfig();
+    _projectNameController.text = _config.projectName;
     _prepareImage();
   }
 
   Future<void> _prepareImage() async {
     try {
-      final normalized = await ImageOrientationService.normalize(widget.imageFile);
+      final normalized = await ImageOrientationService.normalize(
+        widget.imageFile,
+      );
       if (!mounted) {
         normalized.file.delete().ignore();
         return;
@@ -61,11 +72,21 @@ class _EditScreenState extends State<EditScreen> {
         _displayImageFile = normalized.file;
         _imageAspectRatio = normalized.aspectRatio;
       });
+      if (widget.autoSave) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) _saveImage();
+        });
+      }
     } catch (_) {
       if (mounted) {
         setState(() {
           _displayImageFile = widget.imageFile;
         });
+        if (widget.autoSave) {
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (mounted) _saveImage();
+          });
+        }
       }
     }
   }
@@ -117,7 +138,9 @@ class _EditScreenState extends State<EditScreen> {
 
     if (result == null) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Location unavailable or permission denied.')),
+        const SnackBar(
+          content: Text('Location unavailable or permission denied.'),
+        ),
       );
       return;
     }
@@ -135,8 +158,9 @@ class _EditScreenState extends State<EditScreen> {
   Future<void> _saveImage() async {
     setState(() => _saving = true);
     try {
-      final boundary = _repaintKey.currentContext!.findRenderObject()
-          as RenderRepaintBoundary;
+      final boundary =
+          _repaintKey.currentContext!.findRenderObject()
+              as RenderRepaintBoundary;
       final image = await boundary.toImage(pixelRatio: 3.0);
       final byteData = await image.toByteData(format: ui.ImageByteFormat.png);
       final bytes = byteData!.buffer.asUint8List();
@@ -177,13 +201,14 @@ class _EditScreenState extends State<EditScreen> {
         title: Text('Edit Photo', style: TextStyle(color: textColor)),
         actions: [
           IconButton(
-            icon: _saving
-                ? const SizedBox(
-                    width: 20,
-                    height: 20,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  )
-                : const Icon(Icons.save_alt),
+            icon:
+                _saving
+                    ? const SizedBox(
+                      width: 20,
+                      height: 20,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                    : const Icon(Icons.save_alt),
             color: ThemeProvider.accent,
             onPressed: _saving ? null : _saveImage,
           ),
@@ -231,7 +256,11 @@ class _EditScreenState extends State<EditScreen> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(Icons.lock_outline, color: textColor.withValues(alpha: 0.5), size: 28),
+            Icon(
+              Icons.lock_outline,
+              color: textColor.withValues(alpha: 0.5),
+              size: 28,
+            ),
             const SizedBox(height: 8),
             Text(
               'Stamp editor is locked',
@@ -241,7 +270,10 @@ class _EditScreenState extends State<EditScreen> {
             Text(
               'Watch a short ad to modify date, time, day & project name.',
               textAlign: TextAlign.center,
-              style: TextStyle(color: textColor.withValues(alpha: 0.6), fontSize: 13),
+              style: TextStyle(
+                color: textColor.withValues(alpha: 0.6),
+                fontSize: 13,
+              ),
             ),
             const SizedBox(height: 14),
             ElevatedButton.icon(
@@ -307,7 +339,10 @@ class _EditScreenState extends State<EditScreen> {
                     _config.address!,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
-                    style: TextStyle(color: textColor.withValues(alpha: 0.6), fontSize: 12),
+                    style: TextStyle(
+                      color: textColor.withValues(alpha: 0.6),
+                      fontSize: 12,
+                    ),
                   ),
                 ),
               ],
@@ -321,34 +356,52 @@ class _EditScreenState extends State<EditScreen> {
               hintText: 'Project Name (any language)',
               hintStyle: TextStyle(color: textColor.withValues(alpha: 0.4)),
               filled: true,
-              fillColor: isDarkMode
-                  ? const Color(0xFF232326)
-                  : const Color(0xFFF1F2F4),
+              fillColor:
+                  isDarkMode
+                      ? const Color(0xFF232326)
+                      : const Color(0xFFF1F2F4),
               border: OutlineInputBorder(
                 borderRadius: BorderRadius.circular(12),
                 borderSide: BorderSide.none,
               ),
-              contentPadding:
-                  const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+              contentPadding: const EdgeInsets.symmetric(
+                horizontal: 14,
+                vertical: 12,
+              ),
             ),
-            onChanged: (v) =>
-                setState(() => _config = _config.copyWith(projectName: v)),
+            onChanged:
+                (v) =>
+                    setState(() => _config = _config.copyWith(projectName: v)),
           ),
           const SizedBox(height: 12),
           Row(
             children: [
-              Text('Position', style: TextStyle(color: textColor, fontSize: 13)),
+              Text(
+                'Position',
+                style: TextStyle(color: textColor, fontSize: 13),
+              ),
               const SizedBox(width: 10),
-              _positionButton(StampPosition.bottomLeft, Icons.align_horizontal_left),
-              _positionButton(StampPosition.bottomCenter, Icons.align_horizontal_center),
-              _positionButton(StampPosition.bottomRight, Icons.align_horizontal_right),
+              _positionButton(
+                StampPosition.bottomLeft,
+                Icons.align_horizontal_left,
+              ),
+              _positionButton(
+                StampPosition.bottomCenter,
+                Icons.align_horizontal_center,
+              ),
+              _positionButton(
+                StampPosition.bottomRight,
+                Icons.align_horizontal_right,
+              ),
               const Spacer(),
               Text('Card bg', style: TextStyle(color: textColor, fontSize: 13)),
               Switch(
                 value: _config.withBackground,
                 activeThumbColor: ThemeProvider.accent,
-                onChanged: (v) =>
-                    setState(() => _config = _config.copyWith(withBackground: v)),
+                onChanged:
+                    (v) => setState(
+                      () => _config = _config.copyWith(withBackground: v),
+                    ),
               ),
             ],
           ),
@@ -362,7 +415,8 @@ class _EditScreenState extends State<EditScreen> {
     return IconButton(
       icon: Icon(icon),
       color: selected ? ThemeProvider.accent : Colors.grey,
-      onPressed: () => setState(() => _config = _config.copyWith(position: pos)),
+      onPressed:
+          () => setState(() => _config = _config.copyWith(position: pos)),
     );
   }
 
