@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 
 enum StampPosition { bottomLeft, bottomCenter, bottomRight }
 
+enum StampLayout { portrait, landscape }
+
 class StampConfig {
   bool showDate;
   bool showTime;
@@ -18,6 +20,8 @@ class StampConfig {
   double? latitude;
   double? longitude;
   String? address;
+  double boxScale;
+  StampLayout layout;
 
   StampConfig({
     this.showDate = true,
@@ -35,6 +39,8 @@ class StampConfig {
     this.latitude,
     this.longitude,
     this.address,
+    this.boxScale = 1,
+    this.layout = StampLayout.portrait,
   }) : dateTime = dateTime ?? DateTime.now();
 
   StampConfig copyWith({
@@ -53,6 +59,8 @@ class StampConfig {
     double? latitude,
     double? longitude,
     String? address,
+    double? boxScale,
+    StampLayout? layout,
   }) {
     return StampConfig(
       showDate: showDate ?? this.showDate,
@@ -70,6 +78,8 @@ class StampConfig {
       latitude: latitude ?? this.latitude,
       longitude: longitude ?? this.longitude,
       address: address ?? this.address,
+      boxScale: boxScale ?? this.boxScale,
+      layout: layout ?? this.layout,
     );
   }
 }

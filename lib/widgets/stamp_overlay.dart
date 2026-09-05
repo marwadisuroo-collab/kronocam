@@ -10,8 +10,7 @@ class StampOverlay extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final isLandscape =
-        MediaQuery.orientationOf(context) == Orientation.landscape;
+    final isLandscape = config.layout == StampLayout.landscape;
     final lines = <String>[];
 
     lines.add('Project: ${config.projectName.trim()}');
@@ -88,7 +87,7 @@ class StampOverlay extends StatelessWidget {
             )
             .toList();
 
-    return Align(
+    final content = Align(
       alignment: alignment,
       child: Container(
         constraints: BoxConstraints(maxWidth: isLandscape ? 330 : 300),
@@ -128,6 +127,11 @@ class StampOverlay extends StatelessWidget {
           ],
         ),
       ),
+    );
+    return Transform.scale(
+      scale: config.boxScale,
+      alignment: Alignment.topLeft,
+      child: content,
     );
   }
 }

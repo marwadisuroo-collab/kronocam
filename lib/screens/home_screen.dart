@@ -1,14 +1,10 @@
 import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
-import 'dart:ui' as ui;
 
 import 'package:camera/camera.dart';
-import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/rendering.dart';
-import 'package:image/image.dart' as img;
 import 'package:image_picker/image_picker.dart';
 import 'package:provider/provider.dart';
 import 'package:share_plus/share_plus.dart';
@@ -17,57 +13,19 @@ import 'package:geolocator/geolocator.dart';
 
 import '../provider/theme_provider.dart';
 import '../models/stamp_config.dart';
-import '../services/gallery_service.dart';
 import '../services/location_service.dart';
 import '../widgets/stamp_overlay.dart';
 import '../widgets/watch_ad_dialog.dart';
 import 'edit_screen.dart';
 import 'map_screen.dart';
 import 'privacy_policy_screen.dart';
+import 'preview_editor_screen.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
 
   @override
   State<HomeScreen> createState() => _HomeScreenState();
-}
-
-Uint8List _compositeOverlayInIsolate(Map<String, dynamic> input) {
-  final photo = img.decodeImage(input['photo'] as Uint8List);
-  final overlay = img.decodeImage(input['overlay'] as Uint8List);
-  if (photo == null || overlay == null) return input['photo'] as Uint8List;
-
-  final uprightPhoto = img.bakeOrientation(photo);
-  final previewWidth = input['previewWidth'] as double;
-  final previewPixelRatio = input['previewPixelRatio'] as double;
-  final ratioX = input['ratioX'] as double;
-  final ratioY = input['ratioY'] as double;
-  final scale = uprightPhoto.width / (previewWidth * previewPixelRatio);
-  final overlayWidth = math.max(1, (overlay.width * scale).round());
-  final overlayHeight = math.max(1, (overlay.height * scale).round());
-  final resizedOverlay = img.copyResize(
-    overlay,
-    width: overlayWidth,
-    height: overlayHeight,
-    interpolation: img.Interpolation.cubic,
-  );
-  final x = (ratioX * uprightPhoto.width).round().clamp(
-    0,
-    math.max(0, uprightPhoto.width - overlayWidth),
-  ).toInt();
-  final y = (ratioY * uprightPhoto.height).round().clamp(
-    0,
-    math.max(0, uprightPhoto.height - overlayHeight),
-  ).toInt();
-  img.compositeImage(
-    uprightPhoto,
-    resizedOverlay,
-    dstX: x,
-    dstY: y,
-    dstW: overlayWidth,
-    dstH: overlayHeight,
-  );
-  return Uint8List.fromList(img.encodeJpg(uprightPhoto, quality: 95));
 }
 
 class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
@@ -85,8 +43,6 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   Timer? _clockTimer;
   StreamSubscription<AccelerometerEvent>? _accelerometerSubscription;
   StreamSubscription<Position>? _locationSubscription;
-  final GlobalKey _overlayKey = GlobalKey();
-  double _previewLogicalWidth = 1;
   double _overlayRotation = 0;
   Offset _overlayFraction = const Offset(0.04, 0.72);
   double _minZoom = 1;
@@ -165,7 +121,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     if (mounted && fresh != null) {
       _setLocation(fresh);
       _locationSubscription?.cancel();
-      _locationSubscription = LocationService.positionStream.listen((position) async {
+      _locationSubscription = LocationService.positionStream.listen((
+        position,
+      ) async {
         final result = await LocationService.fromCoordinates(
           position.latitude,
           position.longitude,
@@ -214,25 +172,26 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     setState(() => _capturing = true);
     try {
       final xfile = await controller.takePicture();
-      final file = File(xfile.path);
-      final overlayRatio = _overlayFraction;
-      final previewWidth = _previewLogicalWidth;
-      final stampedFile = await _stampCapturedPhoto(
-        file,
-        ratio: overlayRatio,
-        previewWidth: previewWidth,
-      );
-      // Keep the raw capture for the optional editor so editing never stamps
-      // an already-stamped image a second time.
-      setState(() => _lastCapturedFile = file);
-
       if (!mounted) return;
-      final saved = await GalleryService.saveBytes(
-        await stampedFile.readAsBytes(),
-        name: 'KronoCam_${DateTime.now().millisecondsSinceEpoch}',
+      setState(() => _lastCapturedFile = File(xfile.path));
+      unawaited(
+        Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder:
+                (_) => PreviewEditorScreen(
+                  imagePath: xfile.path,
+                  initialConfig: _stampConfig,
+                  initialPosition: _overlayFraction,
+                  onSaveStarted: () {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(content: Text('Photo saved to gallery')),
+                    );
+                  },
+                ),
+          ),
+        ),
       );
-      if (!mounted) return;
-      _showCaptureOptions(file, saved: saved);
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(
@@ -241,44 +200,6 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     } finally {
       if (mounted) setState(() => _capturing = false);
     }
-  }
-
-  Future<File> _stampCapturedPhoto(
-    File source, {
-    required Offset ratio,
-    required double previewWidth,
-  }) async {
-    if (!mounted) return source;
-    final devicePixelRatio = MediaQuery.devicePixelRatioOf(context);
-    await WidgetsBinding.instance.endOfFrame;
-    if (!mounted) return source;
-    final boundary =
-        _overlayKey.currentContext?.findRenderObject() as RenderRepaintBoundary?;
-    if (boundary == null || boundary.size.isEmpty) return source;
-    final overlayImage = await boundary.toImage(
-      pixelRatio: devicePixelRatio,
-    );
-    final overlayData = await overlayImage.toByteData(
-      format: ui.ImageByteFormat.png,
-    );
-    if (overlayData == null) return source;
-    final photoBytes = await source.readAsBytes();
-    final outputBytes = await compute(_compositeOverlayInIsolate, {
-      'photo': photoBytes,
-      'overlay': overlayData.buffer.asUint8List(),
-      'previewWidth': previewWidth,
-      'previewPixelRatio': devicePixelRatio,
-      'ratioX': ratio.dx,
-      'ratioY': ratio.dy,
-    });
-    final output = File(
-      '${source.parent.path}/kronocam_stamped_${DateTime.now().microsecondsSinceEpoch}.jpg',
-    );
-    await output.writeAsBytes(
-      outputBytes,
-      flush: true,
-    );
-    return output;
   }
 
   void _openEditor(File file, {bool autoSave = false}) {
@@ -292,45 +213,6 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
               autoSave: autoSave,
             ),
       ),
-    );
-  }
-
-  Future<void> _showCaptureOptions(File file, {required bool saved}) async {
-    await showModalBottomSheet<void>(
-      context: context,
-      showDragHandle: true,
-      builder:
-          (sheetContext) => SafeArea(
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(20, 4, 20, 20),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Align(
-                    alignment: Alignment.centerLeft,
-                    child: Text(
-                      saved ? 'Photo saved to Gallery' : 'Photo captured',
-                      style: TextStyle(
-                        fontSize: 20,
-                        fontWeight: FontWeight.w800,
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 8),
-                  ListTile(
-                    contentPadding: EdgeInsets.zero,
-                    leading: const Icon(Icons.tune),
-                    title: const Text('Edit Stamp Later'),
-                    subtitle: const Text('Modify the raw captured photo'),
-                    onTap: () {
-                      Navigator.pop(sheetContext);
-                      _openEditor(file);
-                    },
-                  ),
-                ],
-              ),
-            ),
-          ),
     );
   }
 
@@ -420,15 +302,30 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                       ),
                       DropdownButtonFormField<String>(
                         initialValue: _stampConfig.fontFamily,
-                        decoration: const InputDecoration(labelText: 'Font family'),
+                        decoration: const InputDecoration(
+                          labelText: 'Font family',
+                        ),
                         items: const [
-                          DropdownMenuItem(value: 'monospace', child: Text('Monospace')),
-                          DropdownMenuItem(value: 'sans-serif', child: Text('Sans serif')),
-                          DropdownMenuItem(value: 'serif', child: Text('Serif')),
+                          DropdownMenuItem(
+                            value: 'monospace',
+                            child: Text('Monospace'),
+                          ),
+                          DropdownMenuItem(
+                            value: 'sans-serif',
+                            child: Text('Sans serif'),
+                          ),
+                          DropdownMenuItem(
+                            value: 'serif',
+                            child: Text('Serif'),
+                          ),
                         ],
                         onChanged: (value) {
                           if (value == null) return;
-                          setState(() => _setStampConfig(_stampConfig.copyWith(fontFamily: value)));
+                          setState(
+                            () => _setStampConfig(
+                              _stampConfig.copyWith(fontFamily: value),
+                            ),
+                          );
                           setModalState(() {});
                         },
                       ),
@@ -443,7 +340,11 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                               value: _stampConfig.textSize,
                               label: '${_stampConfig.textSize.round()}px',
                               onChanged: (value) {
-                                setState(() => _setStampConfig(_stampConfig.copyWith(textSize: value)));
+                                setState(
+                                  () => _setStampConfig(
+                                    _stampConfig.copyWith(textSize: value),
+                                  ),
+                                );
                                 setModalState(() {});
                               },
                             ),
@@ -452,10 +353,58 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                       ),
                       Row(
                         children: [
+                          const Text('Box size'),
+                          Expanded(
+                            child: Slider(
+                              min: 0.55,
+                              max: 1.8,
+                              divisions: 25,
+                              value: _stampConfig.boxScale,
+                              label:
+                                  '${(_stampConfig.boxScale * 100).round()}%',
+                              onChanged: (value) {
+                                setState(
+                                  () => _setStampConfig(
+                                    _stampConfig.copyWith(boxScale: value),
+                                  ),
+                                );
+                                setModalState(() {});
+                              },
+                            ),
+                          ),
+                        ],
+                      ),
+                      SegmentedButton<StampLayout>(
+                        segments: const [
+                          ButtonSegment(
+                            value: StampLayout.portrait,
+                            label: Text('Portrait Style'),
+                          ),
+                          ButtonSegment(
+                            value: StampLayout.landscape,
+                            label: Text('Landscape Style'),
+                          ),
+                        ],
+                        selected: {_stampConfig.layout},
+                        onSelectionChanged: (value) {
+                          setState(
+                            () => _setStampConfig(
+                              _stampConfig.copyWith(layout: value.first),
+                            ),
+                          );
+                          setModalState(() {});
+                        },
+                      ),
+                      Row(
+                        children: [
                           const Text('Text color'),
                           const SizedBox(width: 12),
                           ..._colorChoices((color) {
-                            setState(() => _setStampConfig(_stampConfig.copyWith(textColor: color)));
+                            setState(
+                              () => _setStampConfig(
+                                _stampConfig.copyWith(textColor: color),
+                              ),
+                            );
                             setModalState(() {});
                           }, _stampConfig.textColor),
                         ],
@@ -465,7 +414,11 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                           const Text('Box color'),
                           const SizedBox(width: 12),
                           ..._colorChoices((color) {
-                            setState(() => _setStampConfig(_stampConfig.copyWith(backgroundColor: color)));
+                            setState(
+                              () => _setStampConfig(
+                                _stampConfig.copyWith(backgroundColor: color),
+                              ),
+                            );
                             setModalState(() {});
                           }, _stampConfig.backgroundColor),
                         ],
@@ -480,7 +433,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                             final result = await Navigator.push<LocationResult>(
                               context,
                               MaterialPageRoute(
-                                builder: (_) => MapScreen(initialLocation: _liveLocation),
+                                builder:
+                                    (_) => MapScreen(
+                                      initialLocation: _liveLocation,
+                                    ),
                               ),
                             );
                             if (mounted && result != null) _setLocation(result);
@@ -547,7 +503,13 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       );
 
   List<Widget> _colorChoices(ValueChanged<Color> onSelected, Color selected) {
-    const colors = [Colors.white, Colors.black, Colors.red, Colors.yellow, Colors.cyan];
+    const colors = [
+      Colors.white,
+      Colors.black,
+      Colors.red,
+      Colors.yellow,
+      Colors.cyan,
+    ];
     return colors
         .map(
           (color) => Padding(
@@ -557,15 +519,16 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
               child: CircleAvatar(
                 radius: 14,
                 backgroundColor: color,
-                child: selected.toARGB32() == color.toARGB32()
-                    ? const Icon(Icons.check, size: 16, color: Colors.grey)
-                    : null,
+                child:
+                    selected.toARGB32() == color.toARGB32()
+                        ? const Icon(Icons.check, size: 16, color: Colors.grey)
+                        : null,
               ),
             ),
           ),
         )
         .toList();
-        }
+  }
 
   Future<void> _unlock(Future<void> Function() action) async {
     if (_modificationsUnlocked) {
@@ -704,7 +667,6 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                     child: LayoutBuilder(
                       builder: (context, constraints) {
                         final size = constraints.biggest;
-                        _previewLogicalWidth = size.width;
                         final position = Offset(
                           _overlayFraction.dx * size.width,
                           _overlayFraction.dy * size.height,
@@ -731,13 +693,11 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                                 child: Transform.rotate(
                                   angle: _overlayRotation,
                                   child: RepaintBoundary(
-                                    key: _overlayKey,
                                     child: ValueListenableBuilder<StampConfig>(
                                       valueListenable: _stampNotifier,
                                       builder:
-                                          (context, config, _) => StampOverlay(
-                                            config: config,
-                                          ),
+                                          (context, config, _) =>
+                                              StampOverlay(config: config),
                                     ),
                                   ),
                                 ),
